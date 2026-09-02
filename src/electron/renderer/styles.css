@@ -344,5 +344,6 @@ button:focus, button:focus-visible { outline: none; }
   border-top: 1px solid var(--line);
   padding-top: 6px;
 }
-.footer-total { font-size: 10px; color: var(--muted); letter-spacing: 0.06em; }
+.footer-total { font-size: 11px; color: var(--number); font-weight: 600; letter-spacing: 0.04em; }
 .footer-updated { font-size: 10px; color: var(--muted); opacity: 0.75; }
+
