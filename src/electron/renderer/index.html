@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Token Monitor Lite</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="lite">
+    <main class="shell">
+      <header class="titlebar">
+        <div class="app-title">
+          <span class="app-title-mark" aria-hidden="true">Σ</span>
+          <span class="app-title-text">Token Monitor</span>
+          <span id="liveDot" class="live-dot" title="Stream offline"></span>
+        </div>
+        <div class="window-actions">
+          <button id="toggleButton" class="icon-button" title="切换 工具/模型 明细" aria-pressed="false">◈</button>
+          <button id="minButton" class="icon-button" title="Minimize">−</button>
+          <button id="closeButton" class="icon-button" title="Close">×</button>
+        </div>
+      </header>
+
+      <section class="period-cards" aria-label="Period stats">
+        <button class="period-card active" data-period="today">
+          <span class="period-label">DAY</span>
+          <span class="period-tokens" id="tokens-today">—</span>
+          <span class="period-cost" id="cost-today">—</span>
+        </button>
+        <button class="period-card" data-period="week">
+          <span class="period-label">WEEK</span>
+          <span class="period-tokens" id="tokens-week">—</span>
+          <span class="period-cost" id="cost-week">—</span>
+        </button>
+        <button class="period-card" data-period="month">
+          <span class="period-label">MONTH</span>
+          <span class="period-tokens" id="tokens-month">—</span>
+          <span class="period-cost" id="cost-month">—</span>
+        </button>
+      </section>
+
+      <section class="breakdown">
+        <div class="section-head">
+          <span class="section-title" id="breakdownTitle">按工具</span>
+          <span class="section-sub" id="breakdownPeriodLabel">今天</span>
+        </div>
+        <div class="rows" id="breakdownRows"></div>
+      </section>
+
+      <section class="limits">
+        <div class="section-head">
+          <span class="section-title">使用额度</span>
+        </div>
+        <div class="rows" id="limitsRows"></div>
+      </section>
+
+      <footer class="footer">
+        <span class="footer-total" id="footerTotal">TOTAL —</span>
+        <span class="footer-updated" id="footerUpdated">—</span>
+      </footer>
+    </main>
+
+    <script src="../../shared/currency.js"></script>
+    <script src="../../shared/compactTokens.js"></script>
+    <script src="../../shared/compactMoney.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

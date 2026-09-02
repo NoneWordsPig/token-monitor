@@ -1,0 +1,30 @@
+{
+  "name": "token-monitor-lite",
+  "productName": "Token Monitor Lite",
+  "version": "0.1.0",
+  "description": "Lightweight Token Monitor — keeps the tokscale backend, renders day/week/month stats, per-tool/per-model usage and provider limits in a small floating window.",
+  "main": "src/electron/main.js",
+  "author": "Javis",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "@xhayper/discord-rpc": "^1.3.4",
+    "chokidar": "^4.0.3",
+    "dotenv": "^17.4.2",
+    "electron-updater": "6.8.9",
+    "koffi": "^3.1.5",
+    "semver": "^7.8.5",
+    "tar": "^7.5.22",
+    "tokscale": "^4.13.0",
+    "undici": "^7.29.0"
+  },
+  "devDependencies": {
+    "electron": "43.4.0"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  }
+}

@@ -1,0 +1,11 @@
+# 参考项目源码
+参考/
+
+# 依赖与运行时产物
+node_modules/
+dist/
+runtime-test/
+
+# 本地运行数据
+*.log
+settings.json
