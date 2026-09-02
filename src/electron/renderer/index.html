@@ -15,36 +15,43 @@
           <span id="liveDot" class="live-dot" title="Stream offline"></span>
         </div>
         <div class="window-actions">
-          <button id="toggleButton" class="icon-button" title="切换 工具/模型 明细" aria-pressed="false">◈</button>
           <button id="minButton" class="icon-button" title="Minimize">−</button>
           <button id="closeButton" class="icon-button" title="Close">×</button>
         </div>
       </header>
 
-      <section class="period-cards" aria-label="Period stats">
-        <button class="period-card active" data-period="today">
-          <span class="period-label">DAY</span>
-          <span class="period-tokens" id="tokens-today">—</span>
-          <span class="period-cost" id="cost-today">—</span>
+      <section class="period-list" aria-label="Period stats">
+        <button class="period-row active" data-period="today">
+          <span class="period-row-label">DAY</span>
+          <span class="period-row-tokens" id="tokens-today">—</span>
+          <span class="period-row-cost" id="cost-today">—</span>
         </button>
-        <button class="period-card" data-period="week">
-          <span class="period-label">WEEK</span>
-          <span class="period-tokens" id="tokens-week">—</span>
-          <span class="period-cost" id="cost-week">—</span>
+        <button class="period-row" data-period="week">
+          <span class="period-row-label">WEEK</span>
+          <span class="period-row-tokens" id="tokens-week">—</span>
+          <span class="period-row-cost" id="cost-week">—</span>
         </button>
-        <button class="period-card" data-period="month">
-          <span class="period-label">MONTH</span>
-          <span class="period-tokens" id="tokens-month">—</span>
-          <span class="period-cost" id="cost-month">—</span>
+        <button class="period-row" data-period="month">
+          <span class="period-row-label">MONTH</span>
+          <span class="period-row-tokens" id="tokens-month">—</span>
+          <span class="period-row-cost" id="cost-month">—</span>
         </button>
       </section>
 
       <section class="breakdown">
         <div class="section-head">
-          <span class="section-title" id="breakdownTitle">按工具</span>
-          <span class="section-sub" id="breakdownPeriodLabel">今天</span>
+          <span class="section-title">按工具</span>
+          <span class="section-sub" id="breakdownPeriodLabel">—</span>
         </div>
         <div class="rows" id="breakdownRows"></div>
+      </section>
+
+      <section class="models">
+        <div class="section-head">
+          <span class="section-title">使用模型</span>
+          <span class="section-sub" id="modelsPeriodLabel">—</span>
+        </div>
+        <div class="rows" id="modelsRows"></div>
       </section>
 
       <section class="limits">

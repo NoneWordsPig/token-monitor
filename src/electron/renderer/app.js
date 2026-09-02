@@ -2,8 +2,6 @@
 
 (() => {
   const tm = window.tokenMonitor;
-  const compactTokens = window.TokenMonitorCompactTokens;
-  const compactMoney = window.TokenMonitorCompactMoney;
   const currencyApi = window.TokenMonitorCurrency;
 
   const CLIENT_LABELS = {
@@ -48,7 +46,30 @@
   };
 
   const PERIOD_LABELS = { today: 'TODAY', week: 'THIS WEEK', month: 'THIS MONTH' };
-  const BREAKDOWN_ROW_LIMIT = 6;
+  const LIST_ROW_LIMIT = 4;
+  const CACHE_KEY = 'tm.lite.cache.v1';
+  const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+  const REFRESH_MS = 60 * 1000;
+
+  function periodHasUsage(period) {
+    return period
+      && (Number(period.totalTokens) > 0 || Number(period.costUsd) > 0);
+  }
+
+  function statsHaveUsage(stats) {
+    const periods = stats && stats.periods;
+    if (!periods) return false;
+    for (const name of ['today', 'month', 'allTime']) {
+      if (periodHasUsage(periods[name])) return true;
+    }
+    return false;
+  }
+
+  function isWarmingUp() {
+    // Before the collector's first real scan lands the snapshot is an empty
+    // skeleton. Treat that as "still loading" instead of painting zeros.
+    return !state.statsHaveUsage && Date.now() < state.warmupUntil;
+  }
 
   function addTo(map, key, value) {
     const amount = Number(value);
@@ -60,19 +81,24 @@
     stats: null,
     settings: null,
     period: 'today',
-    breakdown: 'tool',
+    dailyRows: null,
     week: null,
     historyRevision: '',
-    expanded: false
+    expandedTool: false,
+    expandedModel: false,
+    statsLoaded: false,
+    statsHaveUsage: false,
+    lastCacheSaveAt: 0,
+    warmupUntil: 0
   };
 
   const els = {
     liveDot: document.getElementById('liveDot'),
-    toggle: document.getElementById('toggleButton'),
-    cards: Array.from(document.querySelectorAll('.period-card')),
-    breakdownTitle: document.getElementById('breakdownTitle'),
+    rows: Array.from(document.querySelectorAll('.period-row')),
     breakdownPeriodLabel: document.getElementById('breakdownPeriodLabel'),
     breakdownRows: document.getElementById('breakdownRows'),
+    modelsPeriodLabel: document.getElementById('modelsPeriodLabel'),
+    modelsRows: document.getElementById('modelsRows'),
     limitsRows: document.getElementById('limitsRows'),
     footerTotal: document.getElementById('footerTotal'),
     footerUpdated: document.getElementById('footerUpdated')
@@ -88,21 +114,32 @@
         if (Number.isFinite(numeric) && numeric > 0) map[String(code).toUpperCase()] = numeric;
       }
     }
-    currencyApi.configureRates(map);
+    if (currencyApi && typeof currencyApi.configureRates === 'function') {
+      currencyApi.configureRates(map);
+    }
   }
 
   function settingsValue() {
     return state.settings || {};
   }
 
+  // The Lite window shows exact counts instead of K/M/万 compression so each
+  // figure is unambiguous; money always keeps a fixed 2-decimal format.
   function fmtTokens(value) {
-    const s = settingsValue();
-    return compactTokens.formatCompactTokens(Number(value) || 0, s.compactTokenUnits || 'western', s.language || 'en');
+    return Math.round(Number(value) || 0).toLocaleString('en-US');
   }
 
   function fmtMoney(value) {
     const s = settingsValue();
-    return compactMoney.formatCompactCurrencyFromUsd(Number(value) || 0, s.currency || 'USD', s.compactTokenUnits || 'western', s.language || 'en', { fractionDigits: 2 });
+    const code = currencyApi && typeof currencyApi.normalizeCurrency === 'function'
+      ? currencyApi.normalizeCurrency(s.currency || 'USD')
+      : 'USD';
+    const amount = typeof currencyApi.convertUsd === 'function'
+      ? currencyApi.convertUsd(value, code)
+      : Number(value) || 0;
+    const rates = currencyApi && currencyApi.CURRENCY_RATES;
+    const symbol = (rates && rates[code] && rates[code].symbol) || `${code} `;
+    return `${symbol}${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
 
   function fmtRawMoney(value, currency) {
@@ -157,6 +194,11 @@
     return date.toISOString().slice(0, 10);
   }
 
+  // Week = archived daily rows from the week start through yesterday, plus the
+  // freshest live "today" read. The archived row for today is only used when the
+  // live read is missing or smaller (a live scan may still be warming up), and
+  // it is re-derived on every render so the WEEK figure never trails TODAY while
+  // the collector keeps pushing newer daily numbers.
   function buildWeekPeriod(daily, todayPeriod) {
     const today = new Date();
     const todayKey = localDayKey(today);
@@ -172,9 +214,11 @@
     let hasRows = false;
     const dailyRows = Array.isArray(daily) ? daily : [];
     const dailyTodayTokens = (dailyRows.find((row) => String(row && row.date || '').slice(0, 10) === todayKey) || {}).tokens || 0;
-    // The history graph may already carry today. Prefer the fresher live read
-    // and avoid double counting; otherwise keep the archived today row.
-    const useLiveToday = Boolean(todayPeriod) && todayPeriod.totalTokens > 0 && todayPeriod.totalTokens >= dailyTodayTokens;
+    const liveTokens = Number(todayPeriod && todayPeriod.totalTokens) || 0;
+    // Prefer the live today read when it is present and not smaller than what
+    // the archive last saw, so the week never walks backwards between full
+    // history scans; otherwise keep the archived today row.
+    const useLiveToday = liveTokens > 0 && liveTokens >= dailyTodayTokens;
     for (const row of dailyRows) {
       const date = String(row && row.date || '').slice(0, 10);
       if (!date || date < start || date > todayKey) continue;
@@ -191,9 +235,13 @@
         addTo(period.modelCosts, model, value && value.cost);
       }
     }
-    // Overlay the live today period so the week never trails the real-time read.
     if (useLiveToday) {
       hasRows = true;
+      // The archived today row was skipped above, so the live read must also
+      // contribute the headline totals — previously only its per-client/model
+      // maps were added, which is why WEEK could read lower than TODAY.
+      period.totalTokens += Number(todayPeriod.totalTokens) || 0;
+      period.costUsd += Number(todayPeriod.costUsd) || 0;
       for (const [client, tokens] of Object.entries(todayPeriod.clients || {})) {
         addTo(period.clients, client, tokens);
       }
@@ -210,15 +258,19 @@
     return hasRows ? period : null;
   }
 
-  async function loadWeek() {
+  function computeWeek() {
+    const stats = state.stats;
+    const todayPeriod = stats && stats.periods && stats.periods.today;
+    state.week = buildWeekPeriod(state.dailyRows, todayPeriod);
+    return state.week;
+  }
+
+  async function loadHistory() {
     try {
       const history = await tm.getDashboardHistory({});
-      state.week = buildWeekPeriod(
-        history && history.daily,
-        state.stats && state.stats.periods && state.stats.periods.today
-      );
+      state.dailyRows = Array.isArray(history && history.daily) ? history.daily : [];
     } catch (_) {
-      state.week = null;
+      state.dailyRows = Array.isArray(state.dailyRows) ? state.dailyRows : [];
     }
     render();
   }
@@ -258,64 +310,66 @@
     return wrap;
   }
 
-  function renderCards() {
-    for (const card of els.cards) {
-      const key = card.dataset.period;
-      card.classList.toggle('active', state.period === key);
+  function renderPeriodRows() {
+    for (const row of els.rows) {
+      const key = row.dataset.period;
+      row.classList.toggle('active', state.period === key);
+      const tokensNode = document.getElementById(`tokens-${key}`);
+      const costNode = document.getElementById(`cost-${key}`);
       const period = periodForKey(key);
-      const tokens = document.getElementById(`tokens-${key}`);
-      const cost = document.getElementById(`cost-${key}`);
-      if (period) {
-        tokens.textContent = fmtTokens(period.totalTokens);
-        cost.textContent = fmtMoney(period.costUsd);
+      if (period && (isWarmingUp() ? periodHasUsage(period) : true)) {
+        tokensNode.textContent = fmtTokens(period.totalTokens);
+        costNode.textContent = fmtMoney(period.costUsd);
       } else {
-        tokens.textContent = '—';
-        cost.textContent = '—';
+        tokensNode.textContent = '—';
+        costNode.textContent = '—';
       }
     }
   }
 
-  function renderBreakdown() {
-    const period = periodForKey(state.period);
-    const isModel = state.breakdown === 'model';
-    els.breakdownTitle.textContent = isModel ? 'BY MODEL' : 'BY TOOL';
-    els.breakdownPeriodLabel.textContent = PERIOD_LABELS[state.period] || state.period.toUpperCase();
-
+  function gatherRows(period, mode) {
     const rows = [];
-    if (period) {
-      if (isModel) {
-        const keys = new Set([...Object.keys(period.models || {}), ...Object.keys(period.modelCosts || {})]);
-        for (const key of keys) {
-          const tokens = Number(period.models && period.models[key]) || 0;
-          const cost = Number(period.modelCosts && period.modelCosts[key]) || 0;
-          if (tokens > 0 || cost > 0) rows.push({ id: key, label: formatModelName(key), tokens, cost });
-        }
-      } else {
-        const keys = new Set([...Object.keys(period.clients || {}), ...Object.keys(period.clientCosts || {})]);
-        for (const key of keys) {
-          const tokens = Number(period.clients && period.clients[key]) || 0;
-          const cost = Number(period.clientCosts && period.clientCosts[key]) || 0;
-          if (tokens > 0 || cost > 0) {
-            const id = String(key).toLowerCase();
-            rows.push({ id, key, label: CLIENT_LABELS[id] || key, tokens, cost });
-          }
-        }
-      }
+    if (!period) return rows;
+    const isModel = mode === 'model';
+    const tokenMap = isModel ? period.models : period.clients;
+    const costMap = isModel ? period.modelCosts : period.clientCosts;
+    const keys = new Set([...Object.keys(tokenMap || {}), ...Object.keys(costMap || {})]);
+    for (const key of keys) {
+      const tokens = Number(tokenMap && tokenMap[key]) || 0;
+      const cost = Number(costMap && costMap[key]) || 0;
+      if (tokens <= 0 && cost <= 0) continue;
+      const clientId = String(key).toLowerCase();
+      rows.push({
+        id: key,
+        clientId,
+        label: isModel ? formatModelName(key) : (CLIENT_LABELS[clientId] || key),
+        tokens,
+        cost
+      });
     }
     rows.sort((left, right) => right.tokens - left.tokens || right.cost - left.cost);
+    return rows;
+  }
 
-    const limit = state.expanded ? rows.length : Math.min(BREAKDOWN_ROW_LIMIT, Math.max(rows.length, 1));
-    const maxTokens = Math.max(1, ...rows.map((row) => row.tokens));
-    els.breakdownRows.replaceChildren();
-
-    if (rows.length === 0) {
-      els.breakdownRows.appendChild(element('div', 'limit-empty', 'No usage yet'));
+  function renderList(container, rows, expandedKey, emptyText) {
+    container.replaceChildren();
+    if (!state.statsLoaded) {
+      container.appendChild(element('div', 'limit-empty', 'Loading…'));
       return;
     }
-
+    if (rows.length === 0 && isWarmingUp()) {
+      container.appendChild(element('div', 'limit-empty', 'Loading…'));
+      return;
+    }
+    if (rows.length === 0) {
+      container.appendChild(element('div', 'limit-empty', emptyText || 'No usage yet'));
+      return;
+    }
+    const limit = state[expandedKey] ? rows.length : Math.min(LIST_ROW_LIMIT, Math.max(rows.length, 1));
+    const maxTokens = Math.max(1, ...rows.map((row) => row.tokens));
     for (const row of rows.slice(0, limit)) {
       const line = element('div', 'row');
-      line.appendChild(iconNode(isModel ? row.id : row.key, row.label));
+      line.appendChild(iconNode(row.clientId || row.id, row.label));
       line.appendChild(element('span', 'row-name', row.label));
       line.appendChild(element('span', 'row-tokens', fmtTokens(row.tokens)));
       line.appendChild(element('span', 'row-cost', fmtMoney(row.cost)));
@@ -324,16 +378,26 @@
       fill.style.width = `${Math.max(2, Math.round((row.tokens / maxTokens) * 100))}%`;
       bar.appendChild(fill);
       line.appendChild(bar);
-      els.breakdownRows.appendChild(line);
+      container.appendChild(line);
     }
     if (rows.length > limit) {
       const more = element('button', 'row-more', `+${rows.length - limit} more`);
       more.addEventListener('click', () => {
-        state.expanded = true;
-        renderBreakdown();
+        state[expandedKey] = true;
+        render();
       });
-      els.breakdownRows.appendChild(more);
+      container.appendChild(more);
     }
+  }
+
+  function renderBreakdown() {
+    els.breakdownPeriodLabel.textContent = PERIOD_LABELS[state.period] || state.period.toUpperCase();
+    renderList(els.breakdownRows, gatherRows(periodForKey(state.period), 'tool'), 'expandedTool', 'No usage yet');
+  }
+
+  function renderModels() {
+    els.modelsPeriodLabel.textContent = PERIOD_LABELS[state.period] || state.period.toUpperCase();
+    renderList(els.modelsRows, gatherRows(periodForKey(state.period), 'model'), 'expandedModel', 'No model usage yet');
   }
 
   function renderLimits() {
@@ -421,11 +485,124 @@
   }
 
   function render() {
-    renderCards();
+    computeWeek();
+    renderPeriodRows();
     renderBreakdown();
+    renderModels();
     renderLimits();
     renderFooter();
     renderLiveDot();
+  }
+
+  // Trim the pushed snapshot to just the fields this window renders so the
+  // cold-start cache stays small enough for localStorage.
+  function trimPeriod(period) {
+    if (!period || typeof period !== 'object') return null;
+    return {
+      totalTokens: period.totalTokens,
+      costUsd: period.costUsd,
+      clients: period.clients || null,
+      clientCosts: period.clientCosts || null,
+      models: period.models || null,
+      modelCosts: period.modelCosts || null
+    };
+  }
+
+  function cachePayload() {
+    const stats = state.stats;
+    if (!stats || !stats.periods) return null;
+    const week = computeWeek();
+    return {
+      dayKey: localDayKey(new Date()),
+      savedAt: new Date().toISOString(),
+      updatedAt: stats.updatedAt || '',
+      deviceHistoryRevision: state.historyRevision,
+      periods: {
+        today: trimPeriod(stats.periods.today),
+        month: trimPeriod(stats.periods.month),
+        allTime: trimPeriod(stats.periods.allTime)
+      },
+      limits: stats.limits || null,
+      week: week ? trimPeriod(week) : null,
+      settings: state.settings
+        ? {
+          currency: state.settings.currency,
+          language: state.settings.language,
+          compactTokenUnits: state.settings.compactTokenUnits,
+          currencyRates: state.settings.currencyRates
+        }
+        : null
+    };
+  }
+
+  function saveCache(force) {
+    const now = Date.now();
+    if (!force && now - state.lastCacheSaveAt < 30000) return;
+    state.lastCacheSaveAt = now;
+    try {
+      const payload = cachePayload();
+      if (!payload) return;
+      localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+    } catch (_) {
+      try { localStorage.removeItem(CACHE_KEY); } catch (_) {}
+    }
+  }
+
+  function readCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || parsed.dayKey !== localDayKey(new Date())) return null;
+      const age = Date.now() - Date.parse(parsed.savedAt || 0);
+      if (!Number.isFinite(age) || age < 0 || age > CACHE_MAX_AGE_MS) return null;
+      return parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function hydrateCache() {
+    const cached = readCache();
+    if (!cached) return;
+    if (cached.settings) state.settings = cached.settings;
+    if (cached.periods && cached.settings) configureCurrency();
+    state.historyRevision = String(cached.deviceHistoryRevision || '');
+    const stats = {
+      periods: cached.periods || {},
+      limits: cached.limits || null,
+      updatedAt: cached.updatedAt || ''
+    };
+    if (cached.week) {
+      const week = {
+        totalTokens: cached.week.totalTokens || 0,
+        costUsd: cached.week.costUsd || 0,
+        clients: cached.week.clients || {},
+        clientCosts: cached.week.clientCosts || {},
+        models: cached.week.models || {},
+        modelCosts: cached.week.modelCosts || {}
+      };
+      state.week = week;
+    }
+    state.stats = stats;
+    state.statsLoaded = true;
+    state.statsHaveUsage = statsHaveUsage(stats);
+  }
+
+  function applyStats(stats, { forceHistoryRefresh = false } = {}) {
+    if (!stats) return;
+    state.stats = stats;
+    state.statsLoaded = true;
+    state.statsHaveUsage = statsHaveUsage(stats);
+    const revision = String(stats.deviceHistoryRevision || stats.historyRevision || '');
+    const revisionChanged = revision !== state.historyRevision;
+    state.historyRevision = revision;
+    if (revisionChanged || forceHistoryRefresh || state.dailyRows === null) {
+      void loadHistory();
+    } else {
+      render();
+    }
+    saveCache(revisionChanged);
   }
 
   function onStats(payload) {
@@ -433,61 +610,71 @@
       ? payload.data.stats
       : payload && payload.stats;
     if (!stats) return;
-    state.stats = stats;
-    const revision = String(stats.deviceHistoryRevision || '');
-    if (revision !== state.historyRevision) {
-      state.historyRevision = revision;
-      loadWeek();
-    } else {
-      render();
-    }
+    applyStats(stats);
   }
 
   function onSettings(settings) {
     state.settings = settings || {};
-    state.breakdown = state.settings.breakdownMode === 'model' ? 'model' : 'tool';
-    els.toggle.classList.toggle('active', state.breakdown === 'model');
-    els.toggle.title = state.breakdown === 'model' ? '当前按模型 · 点击切换为按工具' : '当前按工具 · 点击切换为按模型';
     configureCurrency();
     render();
+    saveCache(true);
   }
 
   function bindEvents() {
-    for (const card of els.cards) {
-      card.addEventListener('click', () => {
-        state.period = card.dataset.period;
+    for (const row of els.rows) {
+      row.addEventListener('click', () => {
+        if (row.dataset.period === state.period) return;
+        state.period = row.dataset.period;
+        // A new window resets the per-section "more" expansion so the top N
+        // stay visible without a lingering scroll position from the old period.
+        state.expandedTool = false;
+        state.expandedModel = false;
         render();
       });
     }
-    els.toggle.addEventListener('click', () => {
-      const next = state.breakdown === 'model' ? 'tool' : 'model';
-      tm.updateSettings({ breakdownMode: next }).catch(() => {});
-    });
     document.getElementById('minButton').addEventListener('click', () => tm.minimize());
     document.getElementById('closeButton').addEventListener('click', () => tm.close());
 
     tm.onStatsPush(onStats);
     tm.onSettingsPush(onSettings);
-    tm.onDashboardHistoryChanged(() => loadWeek());
+    tm.onDashboardHistoryChanged(() => { void loadHistory(); });
+
+    // Cheap 60s poll: re-reads the main process's latest cached snapshot over
+    // IPC without forcing a rescan, so it only costs a few ms per tick. Real
+    // number changes still arrive on collector pushes / watch events.
+    window.setInterval(() => {
+      // Hidden (tray) windows keep their timers throttled anyway; skip the
+      // read entirely so hub-client mode does not phone its hub every minute
+      // while nothing is on screen.
+      if (document.hidden) return;
+      tm.getStats().then((stats) => applyStats(stats)).catch(() => {});
+    }, REFRESH_MS);
   }
 
   async function init() {
+    state.warmupUntil = Date.now() + 8000;
+    // Paint last-known data (same day only) before the async IPC round trips
+    // resolve, so a recreated window is never blank while stats load.
+    hydrateCache();
+    render();
+    bindEvents();
+    // The window reveal in main.js waits for this signal; sending it right
+    // after the first paint keeps the open-to-data gap as short as possible.
+    tm.signalContentReady();
+
     const [stats, settings] = await Promise.all([
       tm.getStats().catch(() => null),
       tm.getSettings().catch(() => null)
     ]);
     onSettings(settings);
-    onStats({ data: { stats } });
-    bindEvents();
-    tm.signalContentReady();
-    window.setInterval(() => renderLiveDot(), 15000);
+    applyStats(stats, { forceHistoryRefresh: true });
+    // Once the warm-up window ends with no usage anywhere, repaint zeros so an
+    // empty-but-fresh install does not sit on "Loading…" forever.
+    window.setTimeout(() => { if (isWarmingUp()) render(); }, 8500);
   }
 
   function debugSetStats(stats) {
-    state.stats = stats || null;
-    const revision = String(stats && stats.deviceHistoryRevision || '');
-    if (revision !== state.historyRevision) { state.historyRevision = revision; loadWeek(); }
-    else render();
+    applyStats(stats || null, { forceHistoryRefresh: true });
   }
 
   function debugSetSettings(settings) {
@@ -507,3 +694,8 @@
 
   init();
 })();
+
+
+
+
+
