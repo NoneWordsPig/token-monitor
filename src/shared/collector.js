@@ -67,6 +67,26 @@ const {
   nextLimitsResetBoundary,
   pruneAttemptedResetBoundaries
 } = require('./limitResetBoundary');
+const { hermesShadowActive, hermesShadowHome } = require('./hermesShadow');
+
+// Hermes keeps long-lived sessions (days of activity inside one conversation),
+// and tokscale only buckets a Hermes session by sessions.started_at. Point the
+// tokscale child at a per-day split mirror of the Hermes DB (hermesShadow) so
+// --today/--month/graph windows follow when the session was actually active.
+function tokscaleScanEnv(userArgs, baseEnv) {
+  if (!baseEnv) return baseEnv;
+  // WSL scans carry an explicit --home for the distro; the native mirror must
+  // never redirect those.
+  if (userArgs.includes('--home')) return baseEnv;
+  const clientIndex = userArgs.indexOf('--client');
+  if (clientIndex < 0) return baseEnv;
+  const clients = String(userArgs[clientIndex + 1] || '').split(',').map((value) => value.trim().toLowerCase());
+  if (!clients.includes('hermes')) return baseEnv;
+  const shadowHome = hermesShadowHome({ env: baseEnv });
+  if (!shadowHome) return baseEnv;
+  if (String(baseEnv.HERMES_HOME || '').trim() === shadowHome) return baseEnv;
+  return { ...baseEnv, HERMES_HOME: shadowHome };
+}
 
 function toUnpackedPath(p) {
   // electron-builder asarUnpack stores real files at .../app.asar.unpacked/...
@@ -166,8 +186,9 @@ function parseJsonOutput(stdout) {
 
 function spawnTokscaleJson(userArgs, commandTimeoutMs, command = tokscaleCommand()) {
   const { bin, prefixArgs, env } = command;
+  const scanEnv = tokscaleScanEnv(userArgs, env);
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, [...prefixArgs, ...userArgs], { env, windowsHide: true });
+    const child = spawn(bin, [...prefixArgs, ...userArgs], { env: scanEnv, windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`tokscale timed out after ${commandTimeoutMs}ms`)); }, commandTimeoutMs);
@@ -2647,9 +2668,17 @@ function canTargetTodayPartitions(anchor, targetClients) {
 function configFingerprint(clientsCsv, allTimeSince, projectsEnabled = true, qoderCnDbPath = '') {
   // Deterministic string that captures the config inputs anchor correctness
   // depends on. When this changes, the persisted anchor is invalidated.
+  const clients = normalizeClientsCsv(clientsCsv);
   const qoderCn = String(qoderCnDbPath || '').trim();
   const qoderCnPart = qoderCn ? `|qodercn:${path.resolve(qoderCn)}` : '';
-  return `${normalizeClientsCsv(clientsCsv)}|${allTimeSince}|projects:${projectsEnabled !== false ? 'on' : 'off'}${qoderCnPart}`;
+  // Hermes long-session usage only exists once the per-day mirror is on; a
+  // pre-mirror anchor (month/allTime missing hermes) must not be reused after
+  // an upgrade, so the marker is part of the fingerprint when a Hermes DB is
+  // actually present. One-time cost: the next launch does a full scan.
+  const hermesPart = clients.split(',').includes('hermes') && hermesShadowActive()
+    ? '|hermes-shadow:1'
+    : '';
+  return `${clients}|${allTimeSince}|projects:${projectsEnabled !== false ? 'on' : 'off'}${qoderCnPart}${hermesPart}`;
 }
 
 function qoderCnDbPathForClients(clientsCsv, options = {}) {
